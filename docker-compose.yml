@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  gazebo:
+    image: osrf/ros:noetic-desktop-full
+    container_name: gazebo_sim
+    environment:
+      - DISPLAY=host.docker.internal:0.0
+      - QT_X11_NO_MITSHM=1
+    volumes:
+      - ./models:/root/robot_project/models
+      - ./worlds:/root/robot_project/worlds
+      - ./scripts:/root/robot_project/scripts
+    command: bash -c "apt-get update && apt-get install -y gazebo11 ros-noetic-gazebo-ros-pkgs && tail -f /dev/null"
+    stdin_open: true
+    tty: true

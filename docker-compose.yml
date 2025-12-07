@@ -11,6 +11,6 @@ services:
       - ./models:/root/robot_project/models
       - ./worlds:/root/robot_project/worlds
       - ./scripts:/root/robot_project/scripts
-    command: bash -c "apt-get update && apt-get install -y gazebo11 ros-noetic-gazebo-ros-pkgs && tail -f /dev/null"
+    command: bash -c "apt-get update && apt-get install -y gazebo11 ros-noetic-gazebo-ros-pkgs python3-pip python3-rospy python3-tf ros-noetic-geometry-msgs ros-noetic-sensor-msgs ros-noetic-nav-msgs && pip3 install numpy scipy packaging scikit-fuzzy && echo 'source /opt/ros/noetic/setup.bash' >> ~/.bashrc && echo 'export PYTHONPATH=/opt/ros/noetic/lib/python3/dist-packages' >> ~/.bashrc && tail -f /dev/null"
     stdin_open: true
     tty: true

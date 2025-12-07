@@ -4,6 +4,8 @@ import rospy
 from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
+from gazebo_msgs.srv import SetModelState
+from gazebo_msgs.msg import ModelState
 import math
 import pickle
 import os
@@ -17,55 +19,56 @@ class SimpleQLearningAgent:
         
         self.q_table = np.zeros((n_states, n_actions))
         
-        self.learning_rate = 0.1
+        self.learning_rate = 0.2
         self.discount_factor = 0.95
-        self.epsilon = 1.0
-        self.epsilon_decay = 0.995
-        self.epsilon_min = 0.01
+        self.epsilon = 0.5  # Balanced exploration
+        self.epsilon_decay = 0.98
+        self.epsilon_min = 0.05
         
+        # SIMPLIFIED ACTIONS - Less likely to get stuck
         self.actions = [
-            [0.3, 0.0],
-            [0.3, 0.5],
-            [0.3, -0.5],
-            [0.0, 0.8],
-            [0.0, -0.8],
+            [0.5, 0.0],     # Forward
+            [0.3, 0.5],     # Forward + left
+            [0.3, -0.5],    # Forward + right
+            [0.0, 0.8],     # Rotate left
+            [0.0, -0.8],    # Rotate right
+        ]
+        
+        self.action_names = [
+            "FORWARD",
+            "FWD+LEFT", 
+            "FWD+RIGHT",
+            "ROTATE LEFT",
+            "ROTATE RIGHT"
         ]
     
     def discretize_state(self, lidar_data, distance_to_goal, angle_to_goal):
         front_distance = np.mean(lidar_data[0:3])
         
-        if front_distance < 0.5:
+        if front_distance < 0.6:
             distance_bin = 0
-        elif front_distance < 1.0:
+        elif front_distance < 1.5:
             distance_bin = 1
-        elif front_distance < 2.0:
-            distance_bin = 2
         elif front_distance < 3.0:
+            distance_bin = 2
+        else:
             distance_bin = 3
-        else:
-            distance_bin = 4
         
-        if angle_to_goal < -math.pi/4:
+        if angle_to_goal < -math.pi/3:
             angle_bin = 0
-        elif angle_to_goal < math.pi/4:
+        elif angle_to_goal < math.pi/3:
             angle_bin = 1
-        elif angle_to_goal < 3*math.pi/4:
+        else:
             angle_bin = 2
-        else:
-            angle_bin = 3
         
-        if distance_to_goal < 1.0:
+        if distance_to_goal < 2.0:
             goal_dist_bin = 0
-        elif distance_to_goal < 3.0:
-            goal_dist_bin = 1
         elif distance_to_goal < 5.0:
-            goal_dist_bin = 2
-        elif distance_to_goal < 8.0:
-            goal_dist_bin = 3
+            goal_dist_bin = 1
         else:
-            goal_dist_bin = 4
+            goal_dist_bin = 2
         
-        state = distance_bin * 20 + angle_bin * 5 + goal_dist_bin
+        state = distance_bin * 9 + angle_bin * 3 + goal_dist_bin
         return min(state, self.n_states - 1)
     
     def choose_action(self, state):
@@ -86,22 +89,19 @@ class SimpleQLearningAgent:
     def save(self, filename="/root/robot_project/scripts/q_table.pkl"):
         with open(filename, 'wb') as f:
             pickle.dump(self.q_table, f)
-        print(f"Q-table saved to {filename}")
     
     def load(self, filename="/root/robot_project/scripts/q_table.pkl"):
         if os.path.exists(filename):
             with open(filename, 'rb') as f:
                 self.q_table = pickle.load(f)
-            print(f"Q-table loaded from {filename}")
             return True
         return False
 
 
 class RobotNavigationEnv:
-    """Environment wrapper for robot in Gazebo"""
     
     def __init__(self):
-        rospy.init_node('simple_rl_navigation', anonymous=True)
+        rospy.init_node('rl_navigation_final', anonymous=True)
         
         self.robot_x = -4.0
         self.robot_y = -4.0
@@ -110,26 +110,24 @@ class RobotNavigationEnv:
         self.lidar_received = False
         self.odom_received = False
         
-        self.goal_x = 2.0
-        self.goal_y = 3.0
-        
-        print("Setting up ROS publishers and subscribers...")
+        self.goal_x = -3.5
+        self.goal_y = 3.5
         
         self.cmd_vel_pub = rospy.Publisher('/cmd_vel', Twist, queue_size=10)
         self.lidar_sub = rospy.Subscriber('/robot/laser/scan', LaserScan, self.lidar_callback)
         self.odom_sub = rospy.Subscriber('/odom', Odometry, self.odom_callback)
         
-        print("Waiting for sensor data...")
+        print("⏳ Waiting for sensor data...")
         rate = rospy.Rate(10)
         timeout = 0
         while (not self.lidar_received or not self.odom_received) and timeout < 100:
             rate.sleep()
             timeout += 1
         
-        if timeout >= 100:
-            print("\n WARNING: Timeout waiting for sensors!")
-        else:
-            print("Sensors connected successfully!")
+        if timeout < 100:
+            print(f"✓ Sensors connected!")
+            print(f"✓ Start: ({self.robot_x:.2f}, {self.robot_y:.2f})")
+            print(f"✓ Goal: ({self.goal_x}, {self.goal_y})")
     
     def lidar_callback(self, data):
         self.lidar_received = True
@@ -176,66 +174,125 @@ class RobotNavigationEnv:
         reward = 0.0
         done = False
         
+        # Big reward for getting closer
         if prev_distance is not None:
-            reward += (prev_distance - distance) * 5.0
+            progress = (prev_distance - distance)
+            reward += progress * 20.0  # BIG reward for progress
         
-        if distance < 0.5:
-            reward += 100.0
+        # GOAL!
+        if distance < 0.8:
+            reward += 500.0
             done = True
-            print("Goal reached!")
+            return reward, done, distance
         
+        # Collision
         min_distance = np.min(self.lidar_data)
-        if min_distance < 0.3:
-            reward -= 20.0
+        if min_distance < 0.25:
+            reward -= 100.0
             done = True
-            print("Collision detected!")
+            return reward, done, distance
         
-        reward -= 0.1
+        # Penalty for being too close
+        if min_distance < 0.5:
+            reward -= 5.0
+        
+        # Small time penalty
+        reward -= 0.5
         
         return reward, done, distance
     
     def stop(self):
         cmd = Twist()
         self.cmd_vel_pub.publish(cmd)
-
-
-def train_simple_rl(episodes=50, max_steps=200):
-    """Train robot using simple Q-learning - FAST VERSION FOR DEMO"""
     
+    def reset_robot(self):
+        """Reset robot to start position"""
+        try:
+            rospy.wait_for_service('/gazebo/set_model_state', timeout=2.0)
+            set_state = rospy.ServiceProxy('/gazebo/set_model_state', SetModelState)
+            
+            state = ModelState()
+            state.model_name = 'simple_robot'
+            state.pose.position.x = -4.0
+            state.pose.position.y = -4.0
+            state.pose.position.z = 0
+            state.pose.orientation.w = 1.0
+            
+            set_state(state)
+            rospy.sleep(1.0)
+            print("  🔄 Robot reset to start position")
+        except:
+            print("  ⚠️ Could not reset robot, continuing...")
+
+
+def train_rl_final(episodes=25):
+    
+    print("\n" + "=" * 60)
+    print("REINFORCEMENT LEARNING - FINAL RUN (25 EPISODES)")
     print("=" * 60)
-    print("REINFORCEMENT LEARNING ROBOT NAVIGATION")
-    print("=" * 60)
-    print("\nInitializing environment and agent...")
     
     try:
         env = RobotNavigationEnv()
-        agent = SimpleQLearningAgent()
         
+        if not env.lidar_received or not env.odom_received:
+            print("❌ ERROR: No sensor data!")
+            return
+        
+        agent = SimpleQLearningAgent()
         agent.load()
         
-        print(f"\nStarting FAST training for {episodes} episodes (Demo Mode)")
-        print("Goal: Navigate from (-4, -4) to (-3.5, 3.5)")
-        print("Press Ctrl+C to stop and save progress")
-        print("=" * 60)
+        print(f"\nStarting {episodes} episodes")
+        print(f"Epsilon: {agent.epsilon:.2f}")
+        print("=" * 60 + "\n")
+        
+        success_count = 0
         
         for episode in range(episodes):
+            print(f"\n{'='*60}")
+            print(f"EPISODE {episode + 1}/{episodes}")
+            print(f"{'='*60}")
+            
+            # Reset if stuck far from start
+            if episode > 0:
+                dist_from_start = math.sqrt((env.robot_x + 4)**2 + (env.robot_y + 4)**2)
+                if dist_from_start > 8 or env.get_distance_to_goal() > 10:
+                    env.reset_robot()
+            
             env.stop()
-            rospy.sleep(0.5)  # Faster reset
+            rospy.sleep(0.5)
+            
+            # INITIAL TURN if facing wall
+            if episode == 0:
+                initial_front = np.min(env.lidar_data[:3])
+                if initial_front < 1.5:
+                    print("🔄 Performing 180° turn...")
+                    for i in range(50):
+                        cmd = Twist()
+                        cmd.angular.z = 0.8
+                        env.cmd_vel_pub.publish(cmd)
+                        rospy.sleep(0.1)
+                    env.stop()
+                    rospy.sleep(0.3)
+                    print("✓ Turn complete!\n")
             
             distance = env.get_distance_to_goal()
             angle = env.get_angle_to_goal()
             state = agent.discretize_state(env.lidar_data, distance, angle)
             
             total_reward = 0
-            prev_distance = None
+            prev_distance = distance
+            max_steps = 200
+            
+            print(f"Start: ({env.robot_x:.1f},{env.robot_y:.1f}) → Goal: {distance:.1f}m away")
             
             for step in range(max_steps):
                 action_idx = agent.choose_action(state)
                 action = agent.actions[action_idx]
+                action_name = agent.action_names[action_idx]
+                
                 env.execute_action(action)
                 
                 reward, done, distance = env.calculate_reward(prev_distance)
-                prev_distance = distance
                 total_reward += reward
                 
                 angle = env.get_angle_to_goal()
@@ -243,39 +300,58 @@ def train_simple_rl(episodes=50, max_steps=200):
                 
                 agent.update(state, action_idx, reward, next_state)
                 state = next_state
+                prev_distance = distance
+                
+                # Print every 20 steps
+                if step % 20 == 0:
+                    min_lidar = np.min(env.lidar_data)
+                    print(f"  Step {step:3d}: {action_name:12s} | Dist={distance:.2f}m | Front={min_lidar:.2f}m | R={total_reward:6.1f}")
                 
                 if done:
+                    if distance < 0.8:
+                        print("\n" + "=" * 60)
+                        print("🎯 GOAL REACHED!")
+                        print(f"Position: ({env.robot_x:.2f}, {env.robot_y:.2f})")
+                        print(f"Goal: ({env.goal_x}, {env.goal_y})")
+                        print(f"Distance: {distance:.2f}m")
+                        print(f"Steps: {step+1}")
+                        print("=" * 60 + "\n")
+                        success_count += 1
+                    else:
+                        print(f"\n  💥 Collision at step {step+1}")
                     break
             
             agent.decay_epsilon()
             
-            # Print EVERY episode for demo
-            print(f"Episode {episode + 1}/{episodes} | "
-                  f"Reward: {total_reward:6.1f} | "
-                  f"Steps: {step + 1:3d} | "
-                  f"Epsilon: {agent.epsilon:.3f} | "
-                  f"Distance: {distance:.2f}m")
+            print(f"\n  Episode Summary:")
+            print(f"    Reward: {total_reward:6.1f}")
+            print(f"    Steps: {step + 1}")
+            print(f"    Final Distance: {distance:.2f}m")
+            print(f"    Epsilon: {agent.epsilon:.3f}")
+            print(f"    Success Rate: {success_count}/{episode+1}")
             
-            # Save every 10 episodes
-            if (episode + 1) % 10 == 0:
+            if (episode + 1) % 5 == 0:
                 agent.save()
+                print(f"    💾 Progress saved!")
         
         env.stop()
         agent.save()
+        
         print("\n" + "=" * 60)
-        print("Training complete! Q-table saved.")
+        print("✅ TRAINING COMPLETE!")
+        print(f"Total Successes: {success_count}/{episodes}")
+        print(f"Success Rate: {success_count/episodes*100:.1f}%")
         print("=" * 60)
         
     except KeyboardInterrupt:
-        print("\n\nTraining interrupted by user.")
+        print("\n\n⛔ Stopped by user")
         env.stop()
         agent.save()
-        print("Progress saved!")
     except Exception as e:
-        print(f"\nError occurred: {e}")
+        print(f"\n❌ Error: {e}")
         import traceback
         traceback.print_exc()
 
 
 if __name__ == "__main__":
-    train_simple_rl(episodes=50)
+    train_rl_final(episodes=25)

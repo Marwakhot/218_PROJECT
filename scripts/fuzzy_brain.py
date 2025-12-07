@@ -18,10 +18,11 @@ class FuzzyNavigator:
         self.needs_initial_turn = True
         self.initial_turn_counter = 0
         
-        # Stuck detection
+        # Stuck detection - IMPROVED
         self.last_front = 10.0
         self.position_stuck_counter = 0
         self.long_turn = False
+        self.very_close_counter = 0  # NEW: Track how long we're very close to obstacle
         
         # Input variables
         self.front = ctrl.Antecedent(np.arange(0, 5.1, 0.1), 'front')
@@ -115,7 +116,7 @@ class FuzzyNavigator:
                 # Yes, facing obstacle - need to turn around
                 if self.initial_turn_counter < 50:  # Turn for 5 seconds (180 degrees)
                     if self.initial_turn_counter % 10 == 5:
-                        print(f"🔄 Initial turn to face away from wall ({self.initial_turn_counter}/50)...")
+                        print(f" Initial turn to face away from wall ({self.initial_turn_counter}/50)...")
                     return 0.0, 0.8  # Turn in place
                 else:
                     # Done with initial turn
@@ -126,37 +127,50 @@ class FuzzyNavigator:
                 self.needs_initial_turn = False
                 print("✓ Path clear! Starting navigation...\n")
         
-        # Check if stuck in corner/wall
+        # IMPROVED STUCK DETECTION
         if f < 0.7 and not self.escaping:
             self.stuck_counter += 1
             
-            # Check if position is actually stuck (front distance not changing)
-            if abs(f - self.last_front) < 0.05:
+            # Track if we're VERY close (less than 0.5m)
+            if f < 0.5:
+                self.very_close_counter += 1
+            else:
+                self.very_close_counter = 0
+            
+            # Check if position is actually stuck (front distance not changing much)
+            if abs(f - self.last_front) < 0.08:  # Increased threshold slightly
                 self.position_stuck_counter += 1
             else:
                 self.position_stuck_counter = 0
             
             self.last_front = f
             
-            # Trigger escape if stuck for a while OR truly wedged
-            if self.stuck_counter > 3 or self.position_stuck_counter > 5:
+            # TRIGGER ESCAPE if any of these conditions:
+            # 1. Stuck counter > 3 (getting close repeatedly)
+            # 2. Position truly stuck (not moving away from obstacle)
+            # 3. Very close for multiple iterations (immediate danger)
+            if self.stuck_counter > 3 or self.position_stuck_counter > 4 or self.very_close_counter > 3:
                 # START ESCAPE SEQUENCE
                 self.escaping = True
                 self.escape_phase = 0
                 self.escape_counter = 0
                 
-                # If truly stuck (position not changing), do LONGER turn
-                if self.position_stuck_counter > 5:
+                # If truly stuck or very close, do LONGER turn
+                if self.position_stuck_counter > 4 or self.very_close_counter > 3:
                     self.long_turn = True
-                    print(f"\n🆘 WEDGED IN CORNER! Starting LONG escape sequence...")
+                    print(f"\n🆘 WEDGED/VERY CLOSE! Starting LONG escape sequence...")
                 else:
                     self.long_turn = False
-                    print(f"\n🆘 OBSTACLE! Starting escape sequence...")
+                    print(f"\n🆘 OBSTACLE DETECTED! Starting escape sequence...")
                 
                 self.position_stuck_counter = 0
+                self.very_close_counter = 0
         else:
             if not self.escaping:
-                self.stuck_counter = 0
+                # Only reset counters if we're far enough away
+                if f > 1.0:
+                    self.stuck_counter = 0
+                    self.very_close_counter = 0
                 self.last_front = f
         
         # EXECUTE ESCAPE SEQUENCE
@@ -213,6 +227,7 @@ class FuzzyNavigator:
                     self.escape_phase = 0
                     self.escape_counter = 0
                     self.stuck_counter = 0
+                    self.long_turn = False  # Reset this flag
                     print("  ✓ Escape complete! Resuming...\n")
                     # Keep last_turn_direction in memory for next escape
         

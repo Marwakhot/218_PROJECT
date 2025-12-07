@@ -10,7 +10,7 @@ from fuzzy_brain import FuzzyNavigator
 
 GOAL_X = -3.5
 GOAL_Y = 3.5
-GOAL_THRESHOLD = 0.4
+GOAL_THRESHOLD = 0.8  # Changed from 0.4 to 0.8m
 
 class Controller:
     def __init__(self):
@@ -35,7 +35,7 @@ class Controller:
         self.scan_received = False
         self.odom_received = False
         
-        print("\n⏳ Waiting for sensor data...")
+        print("\n Waiting for sensor data...")
         rate = rospy.Rate(10)
         timeout = 0
         while (not self.scan_received or not self.odom_received) and timeout < 100:
@@ -43,13 +43,14 @@ class Controller:
             timeout += 1
         
         if timeout >= 100:
-            print("❌ ERROR: Timeout waiting for sensors!")
+            print(" ERROR: Timeout waiting for sensors!")
         else:
             print(f"✓ Sensors connected!")
             print(f"✓ Start: ({self.x:.2f}, {self.y:.2f})")
             print(f"✓ Goal: ({GOAL_X}, {GOAL_Y})")
             dist_to_goal = math.sqrt((GOAL_X - self.x)**2 + (GOAL_Y - self.y)**2)
             print(f"✓ Distance to goal: {dist_to_goal:.2f}m")
+            print(f"✓ Goal threshold: {GOAL_THRESHOLD}m")
             print("=" * 60 + "\n")
 
     def odom_callback(self, msg):
@@ -90,7 +91,7 @@ class Controller:
 
     def run(self):
         rate = rospy.Rate(10)
-        print("🚀 Starting Navigation...\n")
+        print(" Starting Navigation...\n")
         last_print = 0
         
         try:
@@ -99,7 +100,7 @@ class Controller:
                 
                 if dist_to_goal < GOAL_THRESHOLD:
                     print("\n" + "=" * 60)
-                    print("🎯 GOAL REACHED!")
+                    print(" GOAL REACHED!")
                     print(f"Final position: ({self.x:.2f}, {self.y:.2f})")
                     print(f"Goal position: ({GOAL_X}, {GOAL_Y})")
                     print(f"Final distance: {dist_to_goal:.2f}m")
@@ -135,7 +136,7 @@ class Controller:
                 rate.sleep()
         
         except KeyboardInterrupt:
-            print("\n⛔ Stopped by user")
+            print("\n Stopped by user")
         finally:
             stop_cmd = Twist()
             self.pub_cmd.publish(stop_cmd)

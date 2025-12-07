@@ -6,9 +6,22 @@ class FuzzyNavigator:
     def __init__(self):
         print("Initializing Fuzzy Navigation System...")
         
-        self.avoiding_obstacle = False
-        self.avoid_timer = 0
-        self.turn_direction = 0
+        # Escape state machine
+        self.escaping = False
+        self.escape_phase = 0
+        self.escape_counter = 0
+        self.stuck_counter = 0
+        self.turn_direction = 1.0  # Default left
+        self.last_turn_direction = None  # Track last turn direction
+        
+        # Initial turn flag
+        self.needs_initial_turn = True
+        self.initial_turn_counter = 0
+        
+        # Stuck detection
+        self.last_front = 10.0
+        self.position_stuck_counter = 0
+        self.long_turn = False
         
         # Input variables
         self.front = ctrl.Antecedent(np.arange(0, 5.1, 0.1), 'front')
@@ -42,7 +55,7 @@ class FuzzyNavigator:
         self.turn['right'] = fuzz.trimf(self.turn.universe, [0.1, 0.4, 0.6])
         self.turn['hard_right'] = fuzz.trimf(self.turn.universe, [0.5, 0.8, 1.0])
 
-        # Rules
+        # Fuzzy Rules
         rule1 = ctrl.Rule(self.front['close'] & self.heading['hard_left'], 
                          [self.speed['slow'], self.turn['hard_left']])
         rule2 = ctrl.Rule(self.front['close'] & self.heading['left'], 
@@ -85,76 +98,142 @@ class FuzzyNavigator:
         print("Fuzzy system initialized!")
 
     def get_action(self, f, l, r, h):
-        front_clipped = np.clip(f, 0.01, 5.0)
-        heading_clipped = np.clip(h, -180, 180)
+        """
+        Navigation with: Initial turn → Normal nav → Escape when stuck
+        """
         
-        try:
-            self.sim.input['front'] = front_clipped
-            self.sim.input['heading'] = heading_clipped
-            self.sim.compute()
+        # INITIAL TURN - Do this once at the start
+        if self.needs_initial_turn:
+            self.initial_turn_counter += 1
             
-            speed = float(self.sim.output['speed'])
-            turn = float(self.sim.output['turn'])
+            # Check if robot is facing obstacle at start
+            if f < 1.5 and self.initial_turn_counter < 5:
+                # Still checking...
+                return 0.0, 0.0
             
-            # OBSTACLE AVOIDANCE STATE MACHINE
-            if f < 0.6:
-                if not self.avoiding_obstacle:
-                    self.avoiding_obstacle = True
-                    self.avoid_timer = 0
-                    self.turn_direction = 1.0 if l > r else -1.0
-                    print(f"OBSTACLE! Starting avoidance - turning {'RIGHT' if self.turn_direction < 0 else 'LEFT'}")
-            
-            if self.avoiding_obstacle:
-                self.avoid_timer += 1
-                
-                # Phase 1: Turn for 15 steps (1.5 seconds)
-                if self.avoid_timer < 15:
-                    speed = 0.0
-                    turn = self.turn_direction * 1.0
-                    print(f"Avoidance Phase 1: Turning in place ({self.avoid_timer}/15)")
-                
-                # Phase 2: Move forward for 30 steps (3 seconds)
-                elif self.avoid_timer < 45:
-                    speed = 0.4
-                    turn = 0.0
-                    print(f"Avoidance Phase 2: Moving forward ({self.avoid_timer}/45)")
-                
-                # Phase 3: Turn back for 10 steps (1 second)
-                elif self.avoid_timer < 55:
-                    speed = 0.3
-                    turn = -self.turn_direction * 0.6
-                    print(f"Avoidance Phase 3: Turning back ({self.avoid_timer}/55)")
-                
-                # Phase 4: Move forward again for 20 steps (2 seconds)
-                elif self.avoid_timer < 75:
-                    speed = 0.4
-                    turn = 0.0
-                    print(f"Avoidance Phase 4: Final forward ({self.avoid_timer}/75)")
-                
-                # Done avoiding
+            if f < 1.5:
+                # Yes, facing obstacle - need to turn around
+                if self.initial_turn_counter < 50:  # Turn for 5 seconds (180 degrees)
+                    if self.initial_turn_counter % 10 == 5:
+                        print(f"🔄 Initial turn to face away from wall ({self.initial_turn_counter}/50)...")
+                    return 0.0, 0.8  # Turn in place
                 else:
-                    self.avoiding_obstacle = False
-                    self.avoid_timer = 0
-                    print("Avoidance complete - resuming navigation")
-                
-                return speed, turn
-            
-            # NORMAL NAVIGATION
-            if speed < 0.25:
-                speed = 0.25
-            
-            # Boost turn for large heading errors
-            if abs(h) > 60:
-                turn = turn * 1.3
-                turn = np.clip(turn, -1.0, 1.0)
-            
-            return speed, turn
-            
-        except Exception as e:
-            print(f"Fuzzy error: {e}")
-            if f < 0.5:
-                return 0.3, (0.9 if l > r else -0.9)
-            elif abs(h) > 60:
-                return 0.35, (0.8 if h > 0 else -0.8)
+                    # Done with initial turn
+                    self.needs_initial_turn = False
+                    print("✓ Initial turn complete! Starting navigation...\n")
             else:
-                return 0.4, 0.0
+                # Path is clear, no initial turn needed
+                self.needs_initial_turn = False
+                print("✓ Path clear! Starting navigation...\n")
+        
+        # Check if stuck in corner/wall
+        if f < 0.7 and not self.escaping:
+            self.stuck_counter += 1
+            
+            # Check if position is actually stuck (front distance not changing)
+            if abs(f - self.last_front) < 0.05:
+                self.position_stuck_counter += 1
+            else:
+                self.position_stuck_counter = 0
+            
+            self.last_front = f
+            
+            # Trigger escape if stuck for a while OR truly wedged
+            if self.stuck_counter > 3 or self.position_stuck_counter > 5:
+                # START ESCAPE SEQUENCE
+                self.escaping = True
+                self.escape_phase = 0
+                self.escape_counter = 0
+                
+                # If truly stuck (position not changing), do LONGER turn
+                if self.position_stuck_counter > 5:
+                    self.long_turn = True
+                    print(f"\n🆘 WEDGED IN CORNER! Starting LONG escape sequence...")
+                else:
+                    self.long_turn = False
+                    print(f"\n🆘 OBSTACLE! Starting escape sequence...")
+                
+                self.position_stuck_counter = 0
+        else:
+            if not self.escaping:
+                self.stuck_counter = 0
+                self.last_front = f
+        
+        # EXECUTE ESCAPE SEQUENCE
+        if self.escaping:
+            self.escape_counter += 1
+            
+            # PHASE 0: Back up HARD (30 steps = 3 seconds)
+            if self.escape_phase == 0:
+                if self.escape_counter < 30:
+                    if self.escape_counter % 10 == 0:
+                        print(f"  Phase 1: Backing up ({self.escape_counter}/30)")
+                    return -0.5, 0.0  # FASTER backup
+                else:
+                    self.escape_phase = 1
+                    self.escape_counter = 0
+                    
+                    # SMART DIRECTION CHOICE:
+                    # If we just escaped recently and hit obstacle again, turn OPPOSITE direction
+                    if self.last_turn_direction is not None:
+                        # Turn opposite to last time
+                        self.turn_direction = -self.last_turn_direction
+                        print(f"  Switching direction from last escape!")
+                    else:
+                        # First escape - choose based on which side has MORE space
+                        self.turn_direction = 1.0 if l > r else -1.0
+                    
+                    # Remember this direction for next time
+                    self.last_turn_direction = self.turn_direction
+                    
+                    direction = "LEFT" if self.turn_direction > 0 else "RIGHT"
+                    print(f"  Phase 2: Turning {direction}...")
+            
+            # PHASE 1: Turn (duration depends on how stuck)
+            if self.escape_phase == 1:
+                turn_duration = 25 if self.long_turn else 8  # Long turn = 90°, short = 20°
+                if self.escape_counter < turn_duration:
+                    if self.escape_counter % 5 == 0:
+                        print(f"  Turning ({self.escape_counter}/{turn_duration})...")
+                    return 0.0, self.turn_direction * 0.8  # Turn in place
+                else:
+                    self.escape_phase = 2
+                    self.escape_counter = 0
+                    print("  Phase 3: Moving forward...")
+            
+            # PHASE 2: Move forward (50 steps = 5 seconds)
+            if self.escape_phase == 2:
+                if self.escape_counter < 50:
+                    if self.escape_counter % 10 == 0:
+                        print(f"  Moving forward ({self.escape_counter}/50)...")
+                    return 0.45, 0.0  # FASTER forward
+                else:
+                    # DONE! Resume normal navigation
+                    self.escaping = False
+                    self.escape_phase = 0
+                    self.escape_counter = 0
+                    self.stuck_counter = 0
+                    print("  ✓ Escape complete! Resuming...\n")
+                    # Keep last_turn_direction in memory for next escape
+        
+        # NORMAL NAVIGATION
+        speed = 0.35
+        turn = 0.0
+        
+        # Correct heading toward goal
+        if abs(h) > 20:
+            turn = 0.5 if h > 0 else -0.5
+        elif abs(h) > 10:
+            turn = 0.3 if h > 0 else -0.3
+        elif abs(h) > 5:
+            turn = 0.15 if h > 0 else -0.15
+        
+        # Gentle obstacle avoidance during normal navigation
+        if f < 1.2 and f > 0.7:
+            speed = 0.3
+            if l < r:
+                turn -= 0.2
+            else:
+                turn += 0.2
+        
+        return speed, turn
